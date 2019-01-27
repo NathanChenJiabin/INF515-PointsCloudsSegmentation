@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.10)
+project(BilateralNN)
+
+#set(CMAKE_CXX_STANDARD 11)
+execute_process(COMMAND python3 -c "import tensorflow; print(tensorflow.sysconfig.get_include())" OUTPUT_VARIABLE Tensorflow_INCLUDE_DIRS)
+# C++11 required for tensorflow
+set(CMAKE_CXX_FLAGS "-std=c++11 ${CMAKE_CXX_FLAGS}")
+set(CMAKE_CXX_FLAGS "-O2 ${CMAKE_CXX_FLAGS}")
+#set(CMAKE_CXX_FLAGS "-shared ${CMAKE_CXX_FLAGS}")
+set(CMAKE_CXX_FLAGS "-fPIC ${CMAKE_CXX_FLAGS}")
+set(CMAKE_CXX_FLAGS "-undefined dynamic_lookup ${CMAKE_CXX_FLAGS}")
+#set(CMAKE_CXX_FLAGS "${TF_CFLAGS} ${CMAKE_CXX_FLAGS}")
+#set(CMAKE_CXX_FLAGS "${TF_LFLAGS} ${CMAKE_CXX_FLAGS}")
+#set(CMAKE_CXX_FLAGS "-DBUILD_SHARED_LIBS=OFF ${CMAKE_CXX_FLAGS}")
+include_directories(${Tensorflow_INCLUDE_DIRS})
+add_library(BilateralNN SHARED LatticeFilterKernel.cpp PermutohedralLattice.h)
