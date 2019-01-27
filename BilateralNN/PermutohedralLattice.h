@@ -9,7 +9,7 @@
 #include <vector>
 #include <math.h>
 #include <memory>
-#include <tclDecls.h>
+// #include <tclDecls.h>
 
 using namespace std;
 using std::vector;
@@ -20,7 +20,7 @@ using std::vector;
 // The lattice points are stored sparsely using a hash table.
 // The key for each point is its spatial location in the (d+1)-
 // dimensional space.
-
+template <typename T>
 class HashTablePermutohedral {
 public:
     // Hash table constructor
@@ -31,7 +31,7 @@ public:
         filled = 0;
         entries.resize(1 << 15);
         keys.resize(kd*entries.size()/2);
-        values.resize(vd*entries.size()/2, 0.0f);
+        values.resize(vd*entries.size()/2, 0);
     }
 
     // Returns the number of vectors stored.
@@ -39,10 +39,10 @@ public:
     // Returns a pointer to the keys array.
     vector<short> &getKeys() { return keys; }
     // Returns a pointer to the values array.
-    vector<float> &getValues() { return values; }
+    vector<T> &getValues() { return values; }
     // Looks up the value vector associated with a given key. May or
     // may not create a new entry if that key doesn’t exist.
-    float *lookup(const vector<short> &key, bool create){
+    T *lookup(const vector<short> &key, bool create){
         // Double hash table size if necessary
         if (create && filled >= entries.size()/2 - 1) { grow(); }
 
@@ -97,7 +97,7 @@ private:
     // Grows the hash table when it runs out of space
     void grow() {
         // Grow the arrays
-        values.resize(vd*entries.size(), 0.0f);
+        values.resize(vd*entries.size(), 0);
         keys.resize(kd*entries.size());
         vector<Entry> newEntries(entries.size()*2);
         // Rehash all the entries
@@ -122,19 +122,20 @@ private:
         int valueIdx;
     };
     vector<short> keys;
-    vector<float> values;
+    vector<T> values;
     vector<Entry> entries;
     size_t filled;
     int kd, vd;
 };
 
-
+template <typename T>
 class PermutohedralLattice {
 public:
     // Constructor
-    PermutohedralLattice(int pd, int vd, int n) :
-            d(pd), vd(vd), n(n), hashTable(pd, vd) {
+    PermutohedralLattice(int pd_, int vd_, int n_) :
+            d(pd_), vd(vd_), n(n_), hashTable(pd_, vd_) {
         // Allocate storage for various arrays
+        scale = 1.0f/(d+1);
         elevated.resize(d+1);
         scaleFactor.resize(d);
         greedy.resize(d+1);
@@ -159,14 +160,14 @@ public:
         // position vector into the hyperplane (see pg.4-5 in paper)
         for (int i = 0; i < d; i++) {
             // the diagonal entries for normalization
-            scaleFactor[i] = 1.0f/(sqrtf((float)(i+1)*(i+2)));
-            scaleFactor[i] *= (d+1)*sqrtf(2.0f/3.f);
+            scaleFactor[i] = 1.0/(sqrt((i+1)*(i+2)));
+            scaleFactor[i] *= (d+1)*sqrt(2.0/3);
         }
     }
 
 
     // Performs splatting with given position and value vectors
-    void splat(const float *position, const float *value) {
+    void splat(const T *position, const T *value) {
 
         // Elevate position into the (d+1)-dimensional hyperplane
         elevated[d] = -d*position[d-1]*scaleFactor[d-1];
@@ -176,14 +177,151 @@ public:
                            (i+2)*position[i]*scaleFactor[i]);
         elevated[0] = elevated[1] + 2*position[0]*scaleFactor[0];
 
+        find_enclosing_simplex();
+
+        // Compute barycentric coordinates
+        compute_barycentric_coordinates();
+
+        // Splat the value into each vertex of the simplex, with
+        // barycentric weights
+        for (int remainder = 0; remainder <= d; remainder++) {
+            // Compute the location of the lattice point explicitly
+            // (all but the last coordinate - it’s redundant because
+            // they sum to zero)
+            for (int i = 0; i < d; i++) {
+                key[i] = greedy[i] + canonical[remainder*(d+1) + rank[i]];
+            }
+
+            // Retrieve pointer to the value at this vertex
+            T *val = hashTable.lookup(key, true);
+
+            // Accumulate values with barycentric weight
+            for (int i = 0; i < vd; i++) {
+                val[i] += barycentric[remainder]*value[i];
+            }
+
+            // Record this interaction to use later when slicing
+            replay[nReplay].offset = static_cast<int>(val - &(hashTable.getValues()[0]));
+            replay[nReplay].weight = barycentric[remainder];
+            nReplay++;
+        }
+
+    }
+
+
+    // Performs a Gaussian blur along each projected axis in the hyperplane.
+    void blur() {
+        // Prepare temporary arrays
+        vector<short> neighbor1(d+1), neighbor2(d+1);
+        vector<T> zero(vd, 0);
+        vector<T> newValue(hashTable.get_size()*vd);
+        vector<T> &oldValue = hashTable.getValues();
+        // For each of d+1 axes,
+        for (int j = 0; j <= d; j++) {
+            // For each vertex in the lattice,
+            for (int i = 0; i < hashTable.get_size(); i++) { // blur point i along axis j
+                // Blur point i in dimension j
+                short *key = &(hashTable.getKeys()[i*d]);
+                for (int k = 0; k < d; k++) {
+                    neighbor1[k] = static_cast<short>(key[k] + 1);
+                    neighbor2[k] = static_cast<short>(key[k] - 1);
+                }
+                neighbor1[j] = static_cast<short>(key[j] - d);
+                neighbor2[j] = static_cast<short>(key[j] + d);
+                T *oldVal = &oldValue[i*vd];
+                T *newVal = &newValue[i*vd];
+
+                T *v1 = hashTable.lookup(neighbor1, false); // look up first neighbor
+                if (v1 == nullptr) v1 = &zero[0];
+
+                float *v2 = hashTable.lookup(neighbor2, false); // look up second neighbor
+                if (v2 == nullptr) v2 = &zero[0];
+
+                // Mix values of the three vertices
+                for (int k = 0; k < vd; k++) {
+                    newVal[k] = 0.25 * v1[k] + 0.5 * oldVal[k] + 0.25 * v2[k] ;
+                }
+            }
+
+            std::swap(oldValue, newValue);
+            // newValue.swap(oldValue);
+        }
+
+    }
+
+
+    // Prepare for slicing
+    void beginSlice() {
+        nReplay = 0;
+    }
+
+    // Performs slicing out of position vectors. The barycentric
+    // weights and the simplex containing each position vector were
+    // calculated and stored in the splatting step.
+    void slice(T *col){
+        const vector<T> &vals = hashTable.getValues();
+        for (int j = 0; j < vd; j++) { col[j] = 0; } // set 0
+
+        for (int i = 0; i <= d; i++) {
+            ReplayEntry r = replay[nReplay++];
+            for (int j = 0; j < vd; j++) {
+                col[j] += r.weight*vals[r.offset + j];
+            }
+        }
+    }
+
+    // Performs a Gauss transform
+    // pos : position vectors
+    // pd : position dimensions
+    // val : value vectors
+    // vd : value dimensions
+    // n : number of items to filter
+    // out : place to store the output
+    static void filter(const T *pos,
+                       const T *val,
+                       T *out,
+                       int pd,
+                       int vd,
+                       int n,
+                       bool reverse= false){
+        // Create lattice
+        PermutohedralLattice<T> lattice(pd, vd, n);
+        // Splat
+        for (int i = 0; i < n; i++) {
+            lattice.splat(pos + i*pd, val + i*vd);
+        }
+        // Blur
+        lattice.blur();
+        // Slice
+        lattice.beginSlice();
+        for (int i = 0; i < n; i++) {
+            lattice.slice(out + i*vd);
+        }
+    }
+
+private:
+    int d, vd, n;
+    float scale;
+    vector<T> elevated, scaleFactor, barycentric;
+    vector<short> canonical, key, greedy;
+    vector<char> rank;
+    struct ReplayEntry {
+        int offset;
+        T weight;
+    };
+    vector<ReplayEntry> replay;
+    int nReplay;
+    HashTablePermutohedral<T> hashTable;
+
+    void find_enclosing_simplex(){
         // Prepare to find the closest lattice points
-        float scale = 1.0f/(d+1);
+        // float scale = 1.0f/(d+1);
         // Greedily search for the closest remainder-zero lattice point
         int sum = 0;
         for (int i = 0; i <= d; i++) {
-            float v = elevated[i]*scale;
-            float up = ceilf(v)*(d+1);
-            float down = floorf(v)*(d+1);
+            T v = elevated[i]*scale;
+            T up = ceil(v) * (d+1);
+            T down = floor(v) * (d+1);
             if (up - elevated[i] < elevated[i] - down) {
                 greedy[i] = (short)up;
             } else {
@@ -191,21 +329,23 @@ public:
             }
             sum += greedy[i];
         }
-        sum /= d+1;
+        sum /= d + 1;
 
         // Rank differential to find the permutation between this
         // simplex and the canonical one. (see pg. 3-4 in paper)
         for (int i = 0; i < d+1; i++) rank[i] = 0; // reset rank
 
         for (int i = 0; i < d; i++) {
+            T di = elevated[i] - greedy[i];
             for (int j = i+1; j <= d; j++) {
-                if (elevated[i] - greedy[i] < elevated[j] - greedy[j]) {
+                if ( di < elevated[j] - greedy[j]) {
                     rank[i]++;
                 } else {
                     rank[j]++;
                 }
             }
         }
+
         if (sum > 0) {
             // Sum too large - the point is off the hyperplane. We
             // need to bring down the ones with the smallest
@@ -230,139 +370,18 @@ public:
                 }
             }
         }
+    }
 
-        // Compute barycentric coordinates
-        for (int i = 0; i < d+2; i++) { barycentric[i] = 0.0f; } // reset barycentric
+    void compute_barycentric_coordinates(){
+        for (int i = 0; i < d+2; i++) { barycentric[i] = 0; } // reset barycentric
 
         for (int i = 0; i <= d; i++) {
-            barycentric[d-rank[i]] += (elevated[i] - greedy[i]) * scale;
-            barycentric[d+1-rank[i]] -= (elevated[i] - greedy[i]) * scale;
+            T delta = (elevated[i] - greedy[i]) * scale;
+            barycentric[d - rank[i]] += delta ;
+            barycentric[d + 1 - rank[i]] -= delta ;
         }
-        barycentric[0] += 1.0f + barycentric[d+1];
-
-        // Splat the value into each vertex of the simplex, with
-        // barycentric weights
-        for (int remainder = 0; remainder <= d; remainder++) {
-            // Compute the location of the lattice point explicitly
-            // (all but the last coordinate - it’s redundant because
-            // they sum to zero)
-            for (int i = 0; i < d; i++) {
-                key[i] = greedy[i] + canonical[remainder*(d+1) + rank[i]];
-            }
-
-            // Retrieve pointer to the value at this vertex
-            float *val = hashTable.lookup(key, true);
-
-            // Accumulate values with barycentric weight
-            for (int i = 0; i < vd; i++) {
-                val[i] += barycentric[remainder]*value[i];
-            }
-
-            // Record this interaction to use later when slicing
-            replay[nReplay].offset = static_cast<int>(val - &hashTable.getValues()[0]);
-            replay[nReplay].weight = barycentric[remainder];
-            nReplay++;
-        }
-
+        barycentric[0] += 1.0 + barycentric[d+1];
     }
-
-
-    // Performs a Gaussian blur along each projected axis in the hyperplane.
-    void blur() {
-        // Prepare temporary arrays
-        vector<short> neighbor1(d+1), neighbor2(d+1);
-        vector<float> zero(vd, 0.0f);
-        vector<float> newValue(hashTable.get_size()*vd);
-        vector<float> &oldValue = hashTable.getValues();
-        // For each of d+1 axes,
-        for (int j = 0; j <= d; j++) {
-            // For each vertex in the lattice,
-            for (int i = 0; i < hashTable.get_size(); i++) {
-                // Blur point i in dimension j
-                short *key = &(hashTable.getKeys()[i*d]);
-                for (int k = 0; k < d; k++) {
-                    neighbor1[k] = static_cast<short>(key[k] + 1);
-                    neighbor2[k] = static_cast<short>(key[k] - 1);
-                }
-                neighbor1[j] = static_cast<short>(key[j] - d);
-                neighbor2[j] = static_cast<short>(key[j] + d);
-                float *oldVal = &oldValue[i*vd];
-                float *newVal = &newValue[i*vd];
-
-                float *v1 = hashTable.lookup(neighbor1, false); // look up first neighbor
-                if (!v1) v1 = &zero[0];
-
-                float *v2 = hashTable.lookup(neighbor2, false); // look up second neighbor
-                if (!v2) v2 = &zero[0];
-
-                // Mix values of the three vertices
-                for (int k = 0; k < vd; k++) {
-                    newVal[k] = (v1[k] + 2*oldVal[k] + v2[k])/4.f;
-                }
-            }
-            newValue.swap(oldValue);
-        }
-
-    }
-
-
-    // Prepare for slicing
-    void beginSlice() {
-        nReplay = 0;
-    }
-
-    // Performs slicing out of position vectors. The barycentric
-    // weights and the simplex containing each position vector were
-    // calculated and stored in the splatting step.
-    void slice(float *col){
-        const vector<float> &vals = hashTable.getValues();
-        for (int j = 0; j < vd; j++) { col[j] = 0; } // set 0
-
-        for (int i = 0; i <= d; i++) {
-            ReplayEntry r = replay[nReplay++];
-            for (int j = 0; j < vd; j++) {
-                col[j] += r.weight*vals[r.offset + j];
-            }
-        }
-    }
-
-    // Performs a Gauss transform
-    // pos : position vectors
-    // pd : position dimensions
-    // val : value vectors
-    // vd : value dimensions
-    // n : number of items to filter
-    // out : place to store the output
-    static void filter(const float *pos, int pd,
-                       const float *val, int vd,
-                       int n, float *out){
-        // Create lattice
-        PermutohedralLattice lattice(pd, vd, n);
-        // Splat
-        for (int i = 0; i < n; i++) {
-            lattice.splat(pos + i*pd, val + i*vd);
-        }
-        // Blur
-        lattice.blur();
-        // Slice
-        lattice.beginSlice();
-        for (int i = 0; i < n; i++) {
-            lattice.slice(out + i*vd);
-        }
-    }
-
-private:
-    int d, vd, n;
-    vector<float> elevated, scaleFactor, barycentric;
-    vector<short> canonical, key, greedy;
-    vector<char> rank;
-    struct ReplayEntry {
-        int offset;
-        float weight;
-    };
-    vector<ReplayEntry> replay;
-    int nReplay;
-    HashTablePermutohedral hashTable;
 
 };
 

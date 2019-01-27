@@ -1,14 +1,16 @@
 
 #include <iostream>
-#include "PermutohedralLattice.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/shape_inference.h"
 
+#include "PermutohedralLattice.h"
+#include "LatticeFilterKernel.h"
+
 using namespace tensorflow;
 
 REGISTER_OP("LatticeFilter")
-        .Attr("T: {float32, float64}")
+        .Attr("T: {float, double}")
         .Attr("bilateral: bool = true")
         .Attr("theta_alpha: float = 1.0")
         .Attr("theta_beta: float = 1.0")
@@ -20,6 +22,28 @@ REGISTER_OP("LatticeFilter")
             c->set_output(0, c->input(0));
             return Status::OK();
         });
+
+//template<typename T>
+//struct ComputeKernel<CPUDevice, T> {
+//    void operator()(const CPUDevice& d, T a){
+//        cout << a << endl;
+//    }
+//};
+template <typename T>
+struct LatticeFilter<CPUDevice, T> {
+    void operator()(const CPUDevice& d,
+                    OpKernelContext* context,
+                    T* output,
+                    const T *val_input,
+                    const T *positions,
+                    int num_pixels,
+                    int pd,
+                    int vd,
+                    bool reverse){
+
+        filter( positions, val_input, output, pd, vd, num_pixels, reverse);
+    }
+};
 
 // OpKernel definition.
 // template parameter <T> is the datatype of the tensors.
@@ -63,8 +87,8 @@ public:
         }
 
         vd = n_input_channels + 1;
-        T spatial_std;
-        T features_std;
+        float spatial_std;
+        float features_std;
         int n_reference_channels;
 
         if(bilateral){
@@ -86,7 +110,7 @@ public:
                                                        TensorShape({batch_size * num_super_pixels * pd}),
                                                        &positions));
 
-        auto allocator = DeviceMemoryAllocator(context);
+        // auto allocator = DeviceMemoryAllocator(context);
 
         for(int b=0; b < batch_size; b++){
 
@@ -95,16 +119,16 @@ public:
             auto in_ptr = &(input_tensor.flat<T>().data()[b * num_super_pixels * n_input_channels]);
             auto out_ptr = &(output_tensor->flat<T>().data()[b * num_super_pixels * n_input_channels]);
 
-            ComputeKernel<Device, T>()(context->eigen_device<Device>(),
-                                       context,
-                                       ref_ptr,
-                                       pos_ptr,
-                                       num_super_pixels,
-                                       n_spatial_dims,
-                                       spatial_dims,
-                                       n_reference_channels,
-                                       spatial_std,
-                                       features_std);
+//            ComputeKernel<Device, T>()(context->eigen_device<Device>(),
+//                                       context,
+//                                       ref_ptr,
+//                                       pos_ptr,
+//                                       num_super_pixels,
+//                                       n_spatial_dims,
+//                                       spatial_dims,
+//                                       n_reference_channels,
+//                                       spatial_std,
+//                                       features_std);
 
             LatticeFilter<Device, T>()(context->eigen_device<Device>(),
                                        context,
@@ -128,4 +152,22 @@ private:
     int vd;
 };
 
+// Register the CPU kernel
+#define REGISTER_CPU(T)                                              \
+    REGISTER_KERNEL_BUILDER(                                         \
+    Name("LatticeFilter").Device(DEVICE_CPU).TypeConstraint<T>("T"), \
+    LatticeFilterOp<CPUDevice, T>);
+
+REGISTER_CPU(float);
+REGISTER_CPU(double);
+
+//#define REGISTER_KERNEL(type)                                       \
+//  REGISTER_KERNEL_BUILDER(                                          \
+//      Name("LatticeFilter").Device(DEVICE_CPU).TypeConstraint<type>("T"), \
+//      LatticeFilterOp<CPUDevice, type>)
+//
+//REGISTER_KERNEL(float);
+//REGISTER_KERNEL(double);
+//
+//#undef REGISTER_KERNEL
 
