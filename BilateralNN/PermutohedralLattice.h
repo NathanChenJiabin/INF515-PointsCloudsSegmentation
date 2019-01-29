@@ -234,7 +234,7 @@ public:
                 T *v1 = hashTable.lookup(neighbor1, false); // look up first neighbor
                 if (v1 == nullptr) v1 = &zero[0];
 
-                float *v2 = hashTable.lookup(neighbor2, false); // look up second neighbor
+                T *v2 = hashTable.lookup(neighbor2, false); // look up second neighbor
                 if (v2 == nullptr) v2 = &zero[0];
 
                 // Mix values of the three vertices
@@ -270,34 +270,6 @@ public:
         }
     }
 
-    // Performs a Gauss transform
-    // pos : position vectors
-    // pd : position dimensions
-    // val : value vectors
-    // vd : value dimensions
-    // n : number of items to filter
-    // out : place to store the output
-    static void filter(const T *pos,
-                       const T *val,
-                       T *out,
-                       int pd,
-                       int vd,
-                       int n,
-                       bool reverse= false){
-        // Create lattice
-        PermutohedralLattice<T> lattice(pd, vd, n);
-        // Splat
-        for (int i = 0; i < n; i++) {
-            lattice.splat(pos + i*pd, val + i*vd);
-        }
-        // Blur
-        lattice.blur();
-        // Slice
-        lattice.beginSlice();
-        for (int i = 0; i < n; i++) {
-            lattice.slice(out + i*vd);
-        }
-    }
 
 private:
     int d, vd, n;
@@ -385,6 +357,49 @@ private:
 
 };
 
+// Performs a Gauss transform
+// pos : position vectors
+// pd : position dimensions
+// val : value vectors
+// vd : value dimensions
+// n : number of items to filter
+// out : place to store the output
+template <typename T>
+static void filter(const T *pos,
+                   const T *val,
+                   T *out,
+                   int pd,
+                   int vd,
+                   int n,
+                   bool reverse= false){
+    // Create lattice
+    PermutohedralLattice<T> lattice(pd, vd, n);
+    // Splat
+    for (int i = 0; i < n; i++) {
+        lattice.splat(pos + i*pd, val + i*vd);
+    }
+    // Blur
+    lattice.blur();
+    // Slice
+    lattice.beginSlice();
+    for (int i = 0; i < n; i++) {
+        lattice.slice(out + i*vd);
+    }
+}
+template void filter<float>(const float *pos,
+                            const float *val,
+                            float *out,
+                            int pd,
+                            int vd,
+                            int n,
+                            bool reverse= false);
+template void filter<double>(const double *pos,
+                            const double *val,
+                            double *out,
+                            int pd,
+                            int vd,
+                            int n,
+                            bool reverse= false);
 
 
 #endif //BILATERALNN_PERMUTOHEDRALLATTICECPU_H

@@ -7,14 +7,12 @@
 #include "PermutohedralLattice.h"
 #include "LatticeFilterKernel.h"
 
-using namespace tensorflow;
+
+typedef Eigen::ThreadPoolDevice CPUDevice;
 
 REGISTER_OP("LatticeFilter")
         .Attr("T: {float, double}")
-        .Attr("bilateral: bool = true")
-        .Attr("theta_alpha: float = 1.0")
-        .Attr("theta_beta: float = 1.0")
-        .Attr("theta_gamma: float = 1.0")
+        .Attr("reverse: bool = false")
         .Input("input_image: T")
         .Input("reference_image: T")
         .Output("output: T")
@@ -23,14 +21,8 @@ REGISTER_OP("LatticeFilter")
             return Status::OK();
         });
 
-//template<typename T>
-//struct ComputeKernel<CPUDevice, T> {
-//    void operator()(const CPUDevice& d, T a){
-//        cout << a << endl;
-//    }
-//};
 template <typename T>
-struct LatticeFilter<CPUDevice, T> {
+struct LatticeFilterFunctor<CPUDevice, T>{
     void operator()(const CPUDevice& d,
                     OpKernelContext* context,
                     T* output,
@@ -41,7 +33,7 @@ struct LatticeFilter<CPUDevice, T> {
                     int vd,
                     bool reverse){
 
-        filter( positions, val_input, output, pd, vd, num_pixels, reverse);
+        filter<T>( positions, val_input, output, pd, vd, num_pixels, reverse);
     }
 };
 
@@ -51,16 +43,13 @@ template <typename Device, typename T>
 class LatticeFilterOp : public OpKernel {
 public:
     explicit LatticeFilterOp(OpKernelConstruction* context) : OpKernel(context) {
-        OP_REQUIRES_OK(context, context->GetAttr("bilateral", &bilateral));
-        OP_REQUIRES_OK(context, context->GetAttr("theta_alpha", &theta_alpha));
-        OP_REQUIRES_OK(context, context->GetAttr("theta_beta", &theta_beta));
-        OP_REQUIRES_OK(context, context->GetAttr("theta_gamma", &theta_gamma));
+        OP_REQUIRES_OK(context, context->GetAttr("reverse", &reverse));
     }
 
     void Compute(OpKernelContext* context) override {
         // Grab the input tensor
-        const Tensor& input_tensor = context->input(0);
-        const Tensor& reference_image_tensor = context->input(1);
+        const Tensor& input_tensor = context->input(0); // shape (nb_points, val_channels) Just one batch
+        const Tensor& reference_image_tensor = context->input(1); // shape (nb_points, pos_channels)
 
         // Create an output tensor
         Tensor* output_tensor = nullptr;
@@ -71,83 +60,39 @@ public:
         OP_REQUIRES(context, input_tensor.NumElements() <= tensorflow::kint32max, // ???
                     errors::InvalidArgument("Too many elements in tensor"));
 
-        // calculate dimensions; dimension 0 is batch; last dimension is channel
-        int rank = input_tensor.dims();
-        int n_spatial_dims = rank - 2;
+        // calculate dimensions;  last dimension is channel
+        int rank = input_tensor.dims(); // 2
+        int n_spatial_dims = rank - 2;  // 0
 
-        auto batch_size = static_cast<int>(input_tensor.dim_size(0));
-        auto n_input_channels = static_cast<int>(input_tensor.dim_size(rank - 1));
-        auto spatial_dims = new int[n_spatial_dims];
+        vd = static_cast<int>(input_tensor.dim_size(rank - 1)); // 3
 
-        int num_super_pixels{1};
-        for (int i = 0; i < n_spatial_dims; i++){
-            auto dim_size = static_cast<int>(input_tensor.dim_size(i + 1));
-            num_super_pixels *= dim_size;
-            spatial_dims[i] = dim_size;
-        }
+        int num_points = static_cast<int>(input_tensor.dim_size(0));
 
-        vd = n_input_channels + 1;
-        float spatial_std;
-        float features_std;
-        int n_reference_channels;
+        pd = static_cast<int>(reference_image_tensor.dim_size(rank - 1));
 
-        if(bilateral){
-            assert(reference_image_tensor.dims() == rank);
-            n_reference_channels = static_cast<int>(reference_image_tensor.dim_size(rank - 1));
-            pd = n_reference_channels + n_spatial_dims;
-            spatial_std = theta_alpha;
-            features_std = theta_beta;
-        }else{
-            pd = n_spatial_dims;
-            n_reference_channels = 0; //set to zero so ComputeKernel does not use reference image channels
-            spatial_std = theta_gamma;
-            features_std = -1; //does not matter
-        }
-
-        // Allocate kernel positions and calculate them
-        Tensor positions;
-        OP_REQUIRES_OK(context, context->allocate_temp(DataTypeToEnum<T>::v(),
-                                                       TensorShape({batch_size * num_super_pixels * pd}),
-                                                       &positions));
+        assert(reference_image_tensor.dims() == rank);
 
         // auto allocator = DeviceMemoryAllocator(context);
 
-        for(int b=0; b < batch_size; b++){
+        auto pos_ptr = &(reference_image_tensor.flat<T>().data()[0]);
+        auto in_ptr = &(input_tensor.flat<T>().data()[0]);
+        auto out_ptr = &(output_tensor->flat<T>().data()[0]);
 
-            auto ref_ptr = &(reference_image_tensor.flat<T>().data()[b * num_super_pixels * n_reference_channels]);
-            auto pos_ptr = &(positions.flat<T>().data()[b * num_super_pixels * pd]);
-            auto in_ptr = &(input_tensor.flat<T>().data()[b * num_super_pixels * n_input_channels]);
-            auto out_ptr = &(output_tensor->flat<T>().data()[b * num_super_pixels * n_input_channels]);
 
-//            ComputeKernel<Device, T>()(context->eigen_device<Device>(),
-//                                       context,
-//                                       ref_ptr,
-//                                       pos_ptr,
-//                                       num_super_pixels,
-//                                       n_spatial_dims,
-//                                       spatial_dims,
-//                                       n_reference_channels,
-//                                       spatial_std,
-//                                       features_std);
+        LatticeFilterFunctor<Device, T>()( context->eigen_device<Device>(),
+                                           context,
+                                           out_ptr,
+                                           in_ptr,
+                                           pos_ptr,
+                                           num_points,
+                                           pd,
+                                           vd,
+                                           reverse );
 
-            LatticeFilter<Device, T>()(context->eigen_device<Device>(),
-                                       context,
-                                       out_ptr,
-                                       in_ptr,
-                                       pos_ptr,
-                                       num_super_pixels,
-                                       pd,
-                                       vd,
-                                       reverse);
-        }
-        delete[](spatial_dims);
     }
 
 private:
-    bool bilateral;
-    float theta_alpha;
-    float theta_beta;
-    float theta_gamma;
+    bool reverse;
     int pd;
     int vd;
 };
@@ -160,14 +105,3 @@ private:
 
 REGISTER_CPU(float);
 REGISTER_CPU(double);
-
-//#define REGISTER_KERNEL(type)                                       \
-//  REGISTER_KERNEL_BUILDER(                                          \
-//      Name("LatticeFilter").Device(DEVICE_CPU).TypeConstraint<type>("T"), \
-//      LatticeFilterOp<CPUDevice, type>)
-//
-//REGISTER_KERNEL(float);
-//REGISTER_KERNEL(double);
-//
-//#undef REGISTER_KERNEL
-

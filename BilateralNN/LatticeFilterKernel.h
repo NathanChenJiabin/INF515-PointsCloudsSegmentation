@@ -9,10 +9,8 @@
 
 using namespace tensorflow;
 
-typedef Eigen::ThreadPoolDevice CPUDevice;
-
 template<typename Device, typename T>
-struct LatticeFilter{
+struct LatticeFilterFunctor{
     void operator()(const Device &d,
                     OpKernelContext* context,
                     T *output,
